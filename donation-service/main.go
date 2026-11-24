@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -15,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type Donation struct {
@@ -34,6 +36,11 @@ type App struct {
 
 func main() {
 	_ = godotenv.Load()
+
+	shutdownTelemetry, err := initTelemetry()
+	if err != nil {
+		log.Fatalf("Erro ao iniciar OpenTelemetry: %v", err)
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -66,8 +73,35 @@ func main() {
 	mux.HandleFunc("/health", app.HealthHandler)
 	mux.HandleFunc("/donations", app.DonationHandler)
 
+	// /health fica fora do trace para não poluir o APM com probes do Kubernetes.
+	handler := otelhttp.NewHandler(mux, "donation-service",
+		otelhttp.WithFilter(func(r *http.Request) bool { return r.URL.Path != "/health" }))
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	// Graceful shutdown: o Kubernetes manda SIGTERM no rollout; terminamos as requisições em voo.
+	go func() {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		<-stop
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		_ = shutdownTelemetry(ctx)
+		_ = db.Close()
+	}()
+
 	log.Printf("donation-service rodando na porta %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 func (a *App) HealthHandler(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +121,7 @@ func (a *App) DonationHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		d.Status = "APPROVED" // Simulação de gateway de pagamento
-		err := a.DB.QueryRow(
+		err := a.DB.QueryRowContext(r.Context(),
 			"INSERT INTO donations (ngo_id, amount, donor_name, status) VALUES ($1, $2, $3, $4) RETURNING id, created_at",
 			d.NgoID, d.Amount, d.DonorName, d.Status,
 		).Scan(&d.ID, &d.CreatedAt)
@@ -108,7 +142,7 @@ func (a *App) DonationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet {
-		rows, err := a.DB.Query("SELECT id, ngo_id, amount, donor_name, status, created_at FROM donations ORDER BY id DESC")
+		rows, err := a.DB.QueryContext(r.Context(), "SELECT id, ngo_id, amount, donor_name, status, created_at FROM donations ORDER BY id DESC")
 		if err != nil {
 			http.Error(w, `{"error":"Erro interno"}`, http.StatusInternalServerError)
 			return
@@ -131,7 +165,9 @@ func (a *App) DonationHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) sendNotificationEvent(d Donation) {
 	body, _ := json.Marshal(d)
-	_, err := a.SqsSvc.SendMessage(&sqs.SendMessageInput{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := a.SqsSvc.SendMessageWithContext(ctx, &sqs.SendMessageInput{
 		MessageBody: aws.String(string(body)),
 		QueueUrl:    aws.String(a.SqsQueueURL),
 	})

@@ -1,0 +1,9 @@
+# Gerado por scripts/setup-backend.sh (backend.tf real fica fora do Git).
+terraform {
+  backend "s3" {
+    bucket       = "solidarytech-tfstate-<ACCOUNT_ID>-us-east-1"
+    key          = "primary/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+  }
+}

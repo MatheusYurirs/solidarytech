@@ -1,0 +1,9 @@
+output "eks_cluster_name" { value = module.eks.cluster_name }
+output "eks_cluster_endpoint" { value = module.eks.cluster_endpoint }
+output "ngo_db_endpoint" { value = module.ngo_db.endpoint }
+output "donation_db_endpoint" { value = module.donation_db.endpoint }
+output "donation_db_arn" { value = module.donation_db.arn }
+output "dynamodb_table" { value = module.dynamodb.table_name }
+output "sqs_url" { value = module.sqs.queue_url }
+output "sqs_arn" { value = module.sqs.queue_arn }
+output "ecr_urls" { value = var.create_ecr ? module.ecr[0].repository_urls : {} }

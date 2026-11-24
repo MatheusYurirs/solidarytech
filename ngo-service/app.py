@@ -5,6 +5,7 @@ from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from telemetry import setup_telemetry
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,6 +14,7 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
+setup_telemetry(app, "ngo-service")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -26,16 +28,18 @@ except Exception as e:
     log.critical(f"Erro ao conectar ao PostgreSQL: {e}")
     sys.exit(1)
 
+
 @app.route('/health')
 def health():
     return jsonify({"status": "ok", "service": "ngo-service"})
+
 
 @app.route('/ngos', methods=['POST'])
 def create_ngo():
     data = request.get_json()
     if not data or not all(k in data for k in ('name', 'email', 'cause', 'city')):
         return jsonify({"error": "Campos obrigatórios ausentes"}), 400
-    
+
     conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -56,6 +60,7 @@ def create_ngo():
     finally:
         pool.putconn(conn)
 
+
 @app.route('/ngos', methods=['GET'])
 def get_ngos():
     conn = pool.getconn()
@@ -69,6 +74,7 @@ def get_ngos():
     finally:
         pool.putconn(conn)
 
+
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 8081))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port)  # nosec B104
